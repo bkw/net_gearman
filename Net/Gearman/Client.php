@@ -47,6 +47,13 @@ class Net_Gearman_Client
     protected $conn = array();
 
     /**
+     * The connections maintained by $conn, mapped by their server address.
+     *
+     * @var resource $connByServer An associative array containing host:port-s as keys and the socket resource as values.
+     */
+    protected $connByServer = array();
+
+    /**
      * A list of Gearman servers
      *
      * @var array $servers A list of potential Gearman servers
@@ -86,10 +93,53 @@ class Net_Gearman_Client
                 continue;
             }
 
+            $this->connByServer[$server] = $conn;
             $this->conn[] = $conn;
         }
 
         $this->timeout = $timeout;
+    }
+
+    /**
+     * Get the status of a task on a particular server.
+     *
+     * @param $server string The server to request the information from. The server must be a part of this client.
+     * @param $handle string The task handle returned when adding the task to the server.
+     * @return array An associative array containing information about the provided task handle. Returns false if the request failed.
+     */
+    public function getStatus($server, $handle)
+    {
+        $s = $this->getConnectionFromServer($server);
+
+        if (empty($s)) {
+            throw new Net_Gearman_Exception('Unknown server in getStatus(): ' . $server);
+        }
+
+        $params = array(
+            'handle' => $handle,
+        );
+
+        Net_Gearman_Connection::send($s, 'get_status', $params);
+
+        $read = array($s);
+        $write = null;
+        $except = null;
+
+        socket_select($read, $write, $except, 10);
+
+        foreach ($read as $socket) {
+            $resp = Net_Gearman_Connection::read($socket);
+
+            if (isset($resp['function'], $resp['data'])
+                && ($resp['function'] == 'status_res')
+            ) {
+                return $resp['data'];
+            } else if (count($resp)) {
+                $this->handleResponse($resp, $socket, $set);
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -100,6 +150,38 @@ class Net_Gearman_Client
     protected function getConnection()
     {
         return $this->conn[array_rand($this->conn)];
+    }
+
+    /**
+     * Get the server host:port from a connection
+     *
+     * @param $connection resource The connection to look up.
+     * @return string A host:port combination for the connection. Returns false if not found.
+     */
+    protected function getServerFromConnection($connection)
+    {
+        foreach($this->connByServer as $server => $conn) {
+            if ($conn === $connection) {
+                return $server;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Get the connection socket resource from a server string.
+     *
+     * @param $server string The server to fetch the connection socket for.
+     * @return resource A socket resource with the connection to the server. Returns null if not found.
+     */
+    protected function getConnectionFromServer($server)
+    {
+        if (isset($this->connByServer[$server])) {
+            return $this->connByServer[$server];
+        }
+
+        return null;
     }
 
     /**
@@ -171,6 +253,13 @@ class Net_Gearman_Client
         }
 
         array_push(Net_Gearman_Connection::$waiting[$s], $task);
+
+        $server = $this->getServerFromConnection($s);
+
+        if ($server)
+        {
+            $task->server = $server;
+        }
     }
 
     /**
